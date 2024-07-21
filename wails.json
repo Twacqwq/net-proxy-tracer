@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "net-proxy-tracer",
+  "outputfilename": "net-proxy-tracer",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Twacqwq",
+    "email": "xiaot.qaq@gmail.com"
+  }
+}
