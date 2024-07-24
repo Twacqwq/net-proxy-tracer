@@ -56,6 +56,7 @@ func (t *tracer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (t *tracer) sendProxyTrace(w http.ResponseWriter, r *http.Request) {
+	// connCtx := r.Context().Value(ctxdata.ProxyConn).(*ProxyConnContext)
 	// TODO read proxy request
 	// TODO read proxy response
 	// TODO write body

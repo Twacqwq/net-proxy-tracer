@@ -74,10 +74,21 @@ func (ps *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// TODO doHTTPS proxy
+	if r.Method == http.MethodConnect {
+		ps.DoHTTPSProxyTrace(w, r)
+		return
+	}
 
-	// TODO doHTTP proxy
+	ps.DoHTTPProxyTrace(w, r)
 }
+
+func (ps *ProxyServer) DoHTTPProxyTrace(w http.ResponseWriter, r *http.Request) {
+	connCtx := r.Context().Value(ctxdata.ProxyConn).(*ProxyConnContext)
+	connCtx.httpDialContext(r)
+	ps.tracer.sendProxyTrace(w, r)
+}
+
+func (ps *ProxyServer) DoHTTPSProxyTrace(w http.ResponseWriter, r *http.Request) {}
 
 func (ps *ProxyServer) Close() error {
 	return ps.server.Close()

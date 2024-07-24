@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"net"
+	"net/http"
 	"sync"
 
 	uuid "github.com/satori/go.uuid"
@@ -10,6 +12,9 @@ import (
 )
 
 type ProxyConnContext struct {
+	dialContextFunc func(context.Context) error
+	alreadyClose    bool
+
 	ClientConnCtx *ClientConnContext
 	ServerConnCtx *ServerConnContext
 }
@@ -17,6 +22,18 @@ type ProxyConnContext struct {
 func NewProxyClientConnContext(c net.Conn) *ProxyConnContext {
 	return &ProxyConnContext{
 		ClientConnCtx: NewClientConnContext(c),
+	}
+}
+
+func (pcc *ProxyConnContext) httpDialContext(r *http.Request) {
+	pcc.dialContextFunc = func(ctx context.Context) error {
+		return nil
+	}
+}
+
+func (pcc *ProxyConnContext) httpsDialContext(r *http.Request) {
+	pcc.dialContextFunc = func(ctx context.Context) error {
+		return nil
 	}
 }
 
