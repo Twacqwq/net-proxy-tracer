@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,13 +14,15 @@ import (
 	"net-proxy-tracer/internal/utils"
 	"net/http"
 	"net/url"
+	"time"
 
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 )
 
 type ProxyConfig struct {
 	Addr             string
 	ExternalProxyURL string
+	Debug            bool
 }
 
 type ProxyServer struct {
@@ -47,6 +51,12 @@ func NewProxyServer(config *ProxyConfig) (*ProxyServer, error) {
 	}
 	ps.tracer = t
 
+	if config.Debug {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
+
+	logrus.Printf("LogLevel: %s", logrus.GetLevel())
+
 	return ps, nil
 }
 
@@ -62,15 +72,15 @@ func (ps *ProxyServer) Start() error {
 		return err
 	}
 
-	log.Println("Start proxy server")
+	logrus.Infof("ProxyServer Starting in %s", ps.server.Addr)
 
 	return ps.server.Serve(&serverListener{ln})
 }
 
 func (ps *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !r.URL.IsAbs() || len(r.URL.Host) == 0 {
-		w = response.NewProxyResponseWriter(w)
-		if res, ok := w.(*response.ProxyResponseWriter); ok {
+		w = response.NewProxyResponseWriterCheck(w)
+		if res, ok := w.(*response.ProxyResponseWriterCheck); ok {
 			if !res.Wrote {
 				res.WriteHeader(http.StatusBadRequest)
 				io.WriteString(res, "Proxy Servers Cannot Initiate Requests Directly")
@@ -88,7 +98,7 @@ func (ps *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (ps *ProxyServer) DoHTTPProxyTrace(w http.ResponseWriter, r *http.Request) {
 	connCtx := r.Context().Value(ctxdata.ProxyConn).(*ProxyConnContext)
-	connCtx.dialContextFunc = func(ctx context.Context) error {
+	connCtx.dialContext = func(ctx context.Context) error {
 		addr := utils.HostJoinPort(r.URL)
 		proxyConn, err := ps.ProxyConn(ctx, r)
 		if err != nil {
@@ -114,6 +124,13 @@ func (ps *ProxyServer) DoHTTPProxyTrace(w http.ResponseWriter, r *http.Request) 
 
 		connCtx.ServerConnCtx = NewServerConnContext(addr, c, WithServerConnContextClient(cli))
 
+		logrus.Debugf(
+			"Server Connect Success. [%s]: [%s] -> [%s]",
+			connCtx.ClientConnCtx.Conn.RemoteAddr(),
+			connCtx.ServerConnCtx.Conn.LocalAddr(),
+			connCtx.ServerConnCtx.Conn.RemoteAddr(),
+		)
+
 		return nil
 	}
 
@@ -132,7 +149,7 @@ func (ps *ProxyServer) Shutdown(ctx context.Context) error {
 
 func (ps *ProxyServer) ProxyURL() func(*http.Request) (*url.URL, error) {
 	return func(r *http.Request) (*url.URL, error) {
-		return ps.getExtenalURL(r.Context().Value(ctxdata.ProxyReqConn).(*http.Request))
+		return ps.getExtenalURL(r.Context().Value(ctxdata.ProxyReq).(*http.Request))
 	}
 }
 
@@ -199,12 +216,39 @@ func (ps *ProxyServer) getProxyConnWithProxyURL(ctx context.Context, proxyURL *u
 		proxyReq.Header.Set("Proxy-Authorization", fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte(proxyURL.User.String()))))
 	}
 
-	// proxyReqCtx, cancel := context.WithTimeout(ctx, time.Minute)
-	// defer cancel()
+	proxyReqCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
 
-	// var resp *http.Response
+	var (
+		resp     *http.Response
+		chNotify = make(chan struct{})
+	)
+	go func() {
+		defer close(chNotify)
+		err = proxyReq.Write(conn)
+		if err != nil {
+			return
+		}
+		resp, err = http.ReadResponse(bufio.NewReader(conn), proxyReq)
+	}()
+	select {
+	case <-proxyReqCtx.Done():
+		_ = conn.Close()
+		<-chNotify
+		return nil, proxyReqCtx.Err()
+	case <-chNotify:
+	}
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 
-	return nil, nil
+	if resp.StatusCode != http.StatusOK {
+		_ = conn.Close()
+		return nil, errors.New(resp.Status)
+	}
+
+	return conn, nil
 }
 
 type serverListener struct {
@@ -218,5 +262,9 @@ func (s *serverListener) Accept() (net.Conn, error) {
 	}
 
 	// create proxy client connection
-	return newProxyClientConn(c)
+	pcc := newProxyClientConn(c)
+
+	logrus.Debugf("Client Connect Success. %s", pcc.Conn.RemoteAddr())
+
+	return pcc, nil
 }

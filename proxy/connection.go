@@ -9,12 +9,12 @@ import (
 	"sync"
 
 	uuid "github.com/satori/go.uuid"
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 )
 
 type ProxyConnContext struct {
-	dialContextFunc func(context.Context) error
-	alreadyClose    bool
+	dialContext  func(context.Context) error
+	alreadyClose bool
 
 	ClientConnCtx *ClientConnContext
 	ServerConnCtx *ServerConnContext
@@ -82,13 +82,16 @@ type proxyClientConn struct {
 	chClose chan struct{}
 }
 
-func newProxyClientConn(c net.Conn) (*proxyClientConn, error) {
-	return &proxyClientConn{
+func newProxyClientConn(c net.Conn) *proxyClientConn {
+	pc := &proxyClientConn{
 		Conn:    c,
-		connCtx: NewProxyClientConnContext(c),
 		r:       bufio.NewReader(c),
 		chClose: make(chan struct{}),
-	}, nil
+	}
+
+	pc.connCtx = NewProxyClientConnContext(pc)
+
+	return pc
 }
 
 func (pcc *proxyClientConn) Peek(n int) ([]byte, error) {
@@ -106,7 +109,7 @@ func (pcc *proxyClientConn) Close() error {
 	if pcc.closed {
 		return pcc.err
 	}
-	log.Infof("do proxyClientConnClose, addr: %s\n", pcc.Conn.RemoteAddr())
+	logrus.Debugf("ProxyClientConnClose: %s", pcc.Conn.RemoteAddr())
 
 	pcc.closed = true
 	pcc.err = pcc.Conn.Close()
@@ -129,5 +132,25 @@ type proxyServerConn struct {
 }
 
 func (psc *proxyServerConn) Close() error {
-	return nil
+	psc.mu.Lock()
+
+	if psc.closed {
+		psc.mu.Unlock()
+		return psc.err
+	}
+	logrus.Debugf("ProxyServerConnClose: [%s] -> [%s]", psc.Conn.LocalAddr(), psc.Conn.RemoteAddr())
+
+	psc.closed = true
+	psc.err = psc.Conn.Close()
+	psc.mu.Unlock()
+
+	if !psc.connCtx.ClientConnCtx.IsTLS {
+		_ = psc.connCtx.ClientConnCtx.Conn.(*proxyClientConn).Conn.(*net.TCPConn).CloseRead()
+	} else {
+		if psc.connCtx.alreadyClose {
+			_ = psc.connCtx.ClientConnCtx.Conn.Close()
+		}
+	}
+
+	return psc.err
 }

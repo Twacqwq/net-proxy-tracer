@@ -1,3 +1,6 @@
-build/bin
+.vscode
+.idea
+build
+tmp
 node_modules
 frontend/dist

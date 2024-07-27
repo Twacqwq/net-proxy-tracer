@@ -3,8 +3,8 @@ package ctxdata
 import "context"
 
 var (
-	ProxyConn    = new(ContextKey)
-	ProxyReqConn = new(ContextKey)
+	ProxyConn = new(ContextKey)
+	ProxyReq  = new(ContextKey)
 )
 
 type ContextKey struct{}

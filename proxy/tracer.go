@@ -3,9 +3,13 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"net-proxy-tracer/internal/ctxdata"
+	"net-proxy-tracer/internal/response"
 	"net/http"
+
+	"github.com/sirupsen/logrus"
 )
 
 type tracer struct {
@@ -20,7 +24,7 @@ func newTracer(p *ProxyServer) (*tracer, error) {
 		client: &http.Client{
 			Transport: &http.Transport{
 				Proxy:              p.ProxyURL(),
-				ForceAttemptHTTP2:  false,
+				ForceAttemptHTTP2:  true,
 				DisableCompression: true,
 				TLSClientConfig:    &tls.Config{},
 			},
@@ -56,10 +60,86 @@ func (t *tracer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (t *tracer) sendProxyTrace(w http.ResponseWriter, r *http.Request) {
-	// connCtx := r.Context().Value(ctxdata.ProxyConn).(*ProxyConnContext)
-	// TODO read proxy request
-	// TODO read proxy response
-	// TODO write body
+	connCtx := r.Context().Value(ctxdata.ProxyConn).(*ProxyConnContext)
+	if connCtx == nil {
+		logrus.Error("proxy connection context is nil")
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
+	// build proxy request with request context
+	proxyReqCtx := context.WithValue(r.Context(), ctxdata.ProxyReq, r)
+	proxyReq, err := http.NewRequestWithContext(proxyReqCtx, r.Method, r.URL.String(), r.Body)
+	if err != nil {
+		logrus.Error(err)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
+	// copy request header
+	for k, v := range r.Header {
+		proxyReq.Header[k] = v
+	}
+
+	// TODO rewrite host
+	rewriteHost := false
+
+	// send proxy request
+	var proxyResp *http.Response
+	if rewriteHost {
+		proxyResp, err = t.client.Do(proxyReq)
+	} else {
+		if connCtx.ServerConnCtx == nil && connCtx.dialContext != nil {
+			if err := connCtx.dialContext(r.Context()); err != nil {
+				logrus.Error(err)
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+		}
+		proxyResp, err = connCtx.ServerConnCtx.client.Do(proxyReq)
+	}
+	if err != nil {
+		logrus.Errorf("Trace %s[%s %s], Status: %s\n%v",
+			connCtx.ServerConnCtx.Conn.RemoteAddr(),
+			proxyResp.Proto, proxyReq.URL.String(),
+			proxyResp.Status,
+			err,
+		)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	defer proxyResp.Body.Close()
+	connCtx.alreadyClose = proxyResp.Close
+
+	resp := &response.Response{
+		StatusCode: proxyResp.StatusCode,
+		Header:     proxyResp.Header,
+		Close:      proxyResp.Close,
+	}
+	respBody, err := io.ReadAll(proxyResp.Body)
+	if err != nil {
+		logrus.Error(err)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	resp.Body = respBody
+
+	if err := resp.WriteBody(w, proxyResp.Body); err != nil {
+		logrus.Errorf("Trace %s[%s %s], Status: %s\n%v",
+			connCtx.ServerConnCtx.Conn.RemoteAddr(),
+			proxyResp.Proto, proxyReq.URL.String(),
+			proxyResp.Status,
+			err,
+		)
+		return
+	}
+
+	logrus.Infof("Trace %s[%s %s], Status: %s",
+		connCtx.ServerConnCtx.Conn.RemoteAddr(),
+		proxyResp.Proto, proxyReq.URL.String(),
+		proxyResp.Status,
+	)
+	logrus.Debugf("Trace Response: %v", proxyResp)
 }
 
 type traceListener struct {
