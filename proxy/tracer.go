@@ -5,9 +5,10 @@ import (
 	"crypto/tls"
 	"io"
 	"net"
-	"net-proxy-tracer/internal/ctxdata"
-	"net-proxy-tracer/internal/response"
 	"net/http"
+
+	"github.com/Twacqwq/net-proxy-tracer/internal/ctxdata"
+	"github.com/Twacqwq/net-proxy-tracer/internal/response"
 
 	"github.com/sirupsen/logrus"
 )

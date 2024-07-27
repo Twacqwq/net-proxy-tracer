@@ -1,4 +1,4 @@
-module net-proxy-tracer
+module github.com/Twacqwq/net-proxy-tracer
 
 go 1.21
 

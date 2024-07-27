@@ -2,8 +2,9 @@ package tests
 
 import (
 	"log"
-	"net-proxy-tracer/proxy"
 	"testing"
+
+	"github.com/Twacqwq/net-proxy-tracer/proxy"
 )
 
 func TestProxyServer(t *testing.T) {

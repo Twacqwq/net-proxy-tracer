@@ -9,12 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net-proxy-tracer/internal/ctxdata"
-	"net-proxy-tracer/internal/response"
-	"net-proxy-tracer/internal/utils"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/Twacqwq/net-proxy-tracer/internal/ctxdata"
+	"github.com/Twacqwq/net-proxy-tracer/internal/response"
+	"github.com/Twacqwq/net-proxy-tracer/internal/utils"
 
 	"github.com/sirupsen/logrus"
 )
