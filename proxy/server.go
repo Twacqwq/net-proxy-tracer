@@ -2,10 +2,14 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/base64"
+	"fmt"
 	"io"
 	"net"
 	"net-proxy-tracer/internal/ctxdata"
 	"net-proxy-tracer/internal/response"
+	"net-proxy-tracer/internal/utils"
 	"net/http"
 	"net/url"
 
@@ -84,7 +88,35 @@ func (ps *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (ps *ProxyServer) DoHTTPProxyTrace(w http.ResponseWriter, r *http.Request) {
 	connCtx := r.Context().Value(ctxdata.ProxyConn).(*ProxyConnContext)
-	connCtx.httpDialContext(r)
+	connCtx.dialContextFunc = func(ctx context.Context) error {
+		addr := utils.HostJoinPort(r.URL)
+		proxyConn, err := ps.ProxyConn(ctx, r)
+		if err != nil {
+			return err
+		}
+
+		c := &proxyServerConn{
+			connCtx: connCtx,
+			Conn:    proxyConn,
+		}
+
+		cli := &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return proxyConn, nil
+				},
+				DisableCompression: true,
+			},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+
+		connCtx.ServerConnCtx = NewServerConnContext(addr, c, WithServerConnContextClient(cli))
+
+		return nil
+	}
+
 	ps.tracer.sendProxyTrace(w, r)
 }
 
@@ -104,6 +136,28 @@ func (ps *ProxyServer) ProxyURL() func(*http.Request) (*url.URL, error) {
 	}
 }
 
+func (ps *ProxyServer) ProxyConn(ctx context.Context, r *http.Request) (net.Conn, error) {
+	proxyURL, err := ps.getExtenalURL(r)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		c    net.Conn
+		addr = utils.HostJoinPort(r.URL)
+	)
+	if proxyURL != nil {
+		c, err = ps.getProxyConnWithProxyURL(ctx, proxyURL, addr, false)
+	} else {
+		c, err = (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return c, nil
+}
+
 func (ps *ProxyServer) getExtenalURL(req *http.Request) (*url.URL, error) {
 	if ps.externalProxy != nil {
 		return ps.externalProxy(req)
@@ -115,6 +169,42 @@ func (ps *ProxyServer) getExtenalURL(req *http.Request) (*url.URL, error) {
 			Host:   req.Host,
 		},
 	})
+}
+
+func (ps *ProxyServer) getProxyConnWithProxyURL(ctx context.Context, proxyURL *url.URL, addr string, sslInsecure bool) (net.Conn, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxyURL.Host)
+	if err != nil {
+		return nil, err
+	}
+
+	if proxyURL.Scheme == "https" {
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName:         proxyURL.Hostname(),
+			InsecureSkipVerify: sslInsecure,
+		})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		conn = tlsConn
+	}
+
+	proxyReq := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: addr},
+		Host:   addr,
+		Header: http.Header{},
+	}
+	if proxyURL.User != nil {
+		proxyReq.Header.Set("Proxy-Authorization", fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte(proxyURL.User.String()))))
+	}
+
+	// proxyReqCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	// defer cancel()
+
+	// var resp *http.Response
+
+	return nil, nil
 }
 
 type serverListener struct {

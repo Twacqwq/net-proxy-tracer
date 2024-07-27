@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"sync"
@@ -25,18 +26,6 @@ func NewProxyClientConnContext(c net.Conn) *ProxyConnContext {
 	}
 }
 
-func (pcc *ProxyConnContext) httpDialContext(r *http.Request) {
-	pcc.dialContextFunc = func(ctx context.Context) error {
-		return nil
-	}
-}
-
-func (pcc *ProxyConnContext) httpsDialContext(r *http.Request) {
-	pcc.dialContextFunc = func(ctx context.Context) error {
-		return nil
-	}
-}
-
 type ClientConnContext struct {
 	ID    uuid.UUID
 	Conn  net.Conn
@@ -51,7 +40,35 @@ func NewClientConnContext(c net.Conn) *ClientConnContext {
 }
 
 type ServerConnContext struct {
+	client       *http.Client
+	tlsConn      *tls.Conn
+	tlsConnState *tls.ConnectionState
+
+	ID   uuid.UUID
+	Addr string
 	Conn net.Conn
+}
+
+func NewServerConnContext(addr string, c net.Conn, opts ...ServerConnContextOption) *ServerConnContext {
+	s := &ServerConnContext{
+		ID:   uuid.NewV4(),
+		Addr: addr,
+		Conn: c,
+	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	return s
+}
+
+type ServerConnContextOption func(*ServerConnContext)
+
+func WithServerConnContextClient(c *http.Client) ServerConnContextOption {
+	return func(scc *ServerConnContext) {
+		scc.client = c
+	}
 }
 
 type proxyClientConn struct {
@@ -100,4 +117,17 @@ func (pcc *proxyClientConn) Close() error {
 	}
 
 	return pcc.err
+}
+
+type proxyServerConn struct {
+	net.Conn
+
+	connCtx *ProxyConnContext
+	mu      sync.Mutex
+	closed  bool
+	err     error
+}
+
+func (psc *proxyServerConn) Close() error {
+	return nil
 }
