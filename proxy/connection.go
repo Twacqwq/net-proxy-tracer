@@ -27,9 +27,12 @@ func NewProxyClientConnContext(c net.Conn) *ProxyConnContext {
 }
 
 type ClientConnContext struct {
-	ID    uuid.UUID
-	Conn  net.Conn
-	IsTLS bool
+	clientHelloInfo *tls.ClientHelloInfo
+
+	ID                 uuid.UUID
+	Conn               net.Conn
+	IsTLS              bool
+	NegotiatedProtocol string
 }
 
 func NewClientConnContext(c net.Conn) *ClientConnContext {

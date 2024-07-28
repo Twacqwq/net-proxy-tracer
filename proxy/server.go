@@ -24,6 +24,7 @@ type ProxyConfig struct {
 	Addr             string
 	ExternalProxyURL string
 	Debug            bool
+	SslInsecure      bool
 }
 
 type ProxyServer struct {
@@ -79,6 +80,11 @@ func (ps *ProxyServer) Start() error {
 }
 
 func (ps *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodConnect {
+		ps.DoHTTPSProxyTrace(w, r)
+		return
+	}
+
 	if !r.URL.IsAbs() || len(r.URL.Host) == 0 {
 		w = response.NewProxyResponseWriterCheck(w)
 		if res, ok := w.(*response.ProxyResponseWriterCheck); ok {
@@ -87,11 +93,6 @@ func (ps *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				io.WriteString(res, "Proxy Servers Cannot Initiate Requests Directly")
 			}
 		}
-	}
-
-	if r.Method == http.MethodConnect {
-		ps.DoHTTPSProxyTrace(w, r)
-		return
 	}
 
 	ps.DoHTTPProxyTrace(w, r)
@@ -138,7 +139,42 @@ func (ps *ProxyServer) DoHTTPProxyTrace(w http.ResponseWriter, r *http.Request) 
 	ps.tracer.sendProxyTrace(w, r)
 }
 
-func (ps *ProxyServer) DoHTTPSProxyTrace(w http.ResponseWriter, r *http.Request) {}
+func (ps *ProxyServer) DoHTTPSProxyTrace(w http.ResponseWriter, r *http.Request) {
+	// get https server conn
+	conn, err := ps.httpsServerConn(r.Context(), r)
+	if err != nil {
+		logrus.Error(err)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
+	// hijack response after proxy conn
+	pconn, err := ps.hiJack(w)
+	if err != nil {
+		logrus.Error(err)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+
+	b, err := pconn.(*proxyClientConn).Peek(3)
+	if err != nil {
+		_ = conn.Close()
+		_ = pconn.Close()
+		logrus.Error(err)
+		return
+	}
+
+	// check tls
+	if !utils.IsTLSConnection(pconn) && !utils.CheckTLSWithHeaderHex(b) {
+		proxyTraffic(conn, pconn)
+		_ = conn.Close()
+		_ = pconn.Close()
+		return
+	}
+
+	r.Context().Value(ctxdata.ProxyConn).(*ProxyConnContext).ClientConnCtx.IsTLS = true
+	ps.tracer.tlsHandshake(r.Context(), conn, pconn)
+}
 
 func (ps *ProxyServer) Close() error {
 	return ps.server.Close()
@@ -165,7 +201,7 @@ func (ps *ProxyServer) ProxyConn(ctx context.Context, r *http.Request) (net.Conn
 		addr = utils.HostJoinPort(r.URL)
 	)
 	if proxyURL != nil {
-		c, err = ps.getProxyConnWithProxyURL(ctx, proxyURL, addr, false)
+		c, err = ps.getProxyConnWithProxyURL(ctx, proxyURL, addr, ps.Config.SslInsecure)
 	} else {
 		c, err = (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	}
@@ -179,6 +215,10 @@ func (ps *ProxyServer) ProxyConn(ctx context.Context, r *http.Request) (net.Conn
 func (ps *ProxyServer) getExtenalURL(req *http.Request) (*url.URL, error) {
 	if ps.externalProxy != nil {
 		return ps.externalProxy(req)
+	}
+
+	if len(req.URL.Scheme) == 0 {
+		req.URL.Scheme = "https"
 	}
 
 	return http.ProxyFromEnvironment(&http.Request{
@@ -252,6 +292,36 @@ func (ps *ProxyServer) getProxyConnWithProxyURL(ctx context.Context, proxyURL *u
 	return conn, nil
 }
 
+func (ps *ProxyServer) httpsServerConn(ctx context.Context, r *http.Request) (net.Conn, error) {
+	connCtx := r.Context().Value(ctxdata.ProxyConn).(*ProxyConnContext)
+	if connCtx == nil {
+		return nil, errors.New("proxy connection context is nil")
+	}
+
+	pconn, err := ps.ProxyConn(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	connCtx.ServerConnCtx = NewServerConnContext(r.Host, pconn)
+
+	return connCtx.ServerConnCtx.Conn, nil
+}
+
+func (ps *ProxyServer) hiJack(w http.ResponseWriter) (net.Conn, error) {
+	pconn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = pconn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	if err != nil {
+		return nil, err
+	}
+
+	return pconn, nil
+}
+
 type serverListener struct {
 	net.Listener
 }
@@ -268,4 +338,38 @@ func (s *serverListener) Accept() (net.Conn, error) {
 	logrus.Debugf("Client Connect Success. %s", pcc.Conn.RemoteAddr())
 
 	return pcc, nil
+}
+
+// proxyTraffic full-duplex communication
+func proxyTraffic(client, server io.ReadWriteCloser) {
+	chErr := make(chan error, 2)
+
+	// client -> server
+	go func() {
+		_, err := io.Copy(server, client)
+		logrus.Debug("[Proxy Traffic]: Client -> Server")
+		_ = client.Close()
+		chErr <- err
+	}()
+
+	// server -> client
+	go func() {
+		_, err := io.Copy(client, server)
+		logrus.Debug("[Proxy Traffic]: Server -> Client")
+		_ = server.Close()
+
+		if clientConn, ok := client.(*proxyClientConn); ok {
+			err = clientConn.Conn.(*net.TCPConn).CloseRead()
+		}
+
+		chErr <- err
+	}()
+
+	// check error
+	for i := 0; i < 2; i++ {
+		if err := <-chErr; err != nil && err != io.EOF {
+			logrus.Error(err)
+			return
+		}
+	}
 }
